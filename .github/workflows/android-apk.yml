@@ -1,4 +1,4 @@
-name: Validar integração Android (sem publicar APK)
+name: Validar YOLOv8 Android (publicação bloqueada)
 on:
   push:
     branches: [main]
@@ -17,8 +17,9 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Compilar código para validar integração
-        run: gradle --no-daemon :app:assembleDebug
-      - name: Verificar presença do modelo treinado
+      - name: Verificar modelo treinado
         run: |
-          test -s app/src/main/assets/pecas_yolov8.tflite || { echo "Modelo ausente: APK não será publicado."; exit 1; }
+          test -s app/src/main/assets/parts_yolov8.onnx || { echo "::error::Modelo parts_yolov8.onnx ausente. Treine e adicione o modelo antes de gerar APK."; exit 1; }
+      - name: Compilar somente para validação
+        run: gradle --no-daemon :app:assembleDebug
+# Publicação em Releases intencionalmente desativada até teste de inferência.
