@@ -1,12 +1,12 @@
-name: Gerar APK Android
+name: Validar integração Android (sem publicar APK)
 on:
   push:
     branches: [main]
   workflow_dispatch:
 permissions:
-  contents: write
+  contents: read
 jobs:
-  build:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,21 +17,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Compilar APK
+      - name: Compilar código para validar integração
         run: gradle --no-daemon :app:assembleDebug
-      - name: Preparar arquivo APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk FOCOS-v2.0.apk
-      - uses: actions/upload-artifact@v4
-        with:
-          name: FOCOS-APK
-          path: FOCOS-v2.0.apk
-          if-no-files-found: error
-      - name: Publicar APK em Releases
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Verificar presença do modelo treinado
         run: |
-          if gh release view v2.0 >/dev/null 2>&1; then
-            gh release upload v2.0 FOCOS-v2.0.apk --clobber
-          else
-            gh release create v2.0 FOCOS-v2.0.apk --title "FOCOS v2.0" --notes "Contador offline com fundo adaptativo, estimativa de itens encostados, edição manual e temas. Versão experimental." --latest
-          fi
+          test -s app/src/main/assets/pecas_yolov8.tflite || { echo "Modelo ausente: APK não será publicado."; exit 1; }
