@@ -7,6 +7,7 @@ android {
  kotlinOptions { jvmTarget = "17" }
 }
 dependencies {
+ implementation("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")
  implementation("androidx.core:core-ktx:1.15.0")
  implementation("androidx.activity:activity-ktx:1.9.3")
  implementation("androidx.camera:camera-core:1.4.1")
