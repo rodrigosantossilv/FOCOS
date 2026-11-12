@@ -1,4 +1,4 @@
-name: Validar YOLOv8 Android (publicação bloqueada)
+name: FOCOS - Validar Android YOLOv8
 on:
   push:
     branches: [main]
@@ -6,7 +6,7 @@ on:
 permissions:
   contents: read
 jobs:
-  validate:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,9 +17,13 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Verificar modelo treinado
-        run: |
-          test -s app/src/main/assets/parts_yolov8.onnx || { echo "::error::Modelo parts_yolov8.onnx ausente. Treine e adicione o modelo antes de gerar APK."; exit 1; }
-      - name: Compilar somente para validação
+      - name: Compilar projeto Android
         run: gradle --no-daemon :app:assembleDebug
-# Publicação em Releases intencionalmente desativada até teste de inferência.
+      - name: Exigir modelo real antes de liberar APK
+        run: |
+          if [ ! -s app/src/main/assets/parts_yolov8.onnx ]; then
+            echo "::error::YOLOv8 treinado ausente: não publicar APK sem contagem funcional."
+            exit 1
+          fi
+          echo "Modelo encontrado; ainda é necessário validar inferência e precisão antes da publicação."
+# Releases intencionalmente desabilitados até testes com o modelo treinado.
