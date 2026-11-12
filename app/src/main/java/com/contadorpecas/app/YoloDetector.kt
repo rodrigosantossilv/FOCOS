@@ -12,11 +12,11 @@ import kotlin.math.*
 /**
  * YOLOv8 detection head export: [1,4+C,N], float32, xywh in input pixels.
  * This is NOT compatible with end-to-end/NMS-embedded exports.
- * Training classes: screw, nut, washer, automotive_part.
+ * Training class: objeto.
  */
 class YoloDetector(context:Context):AutoCloseable {
  data class Detection(val box:RectF,val label:String,val score:Float)
- private val names=listOf("Parafuso","Porca","Arruela","Peça automotiva")
+ private val names=listOf("Objeto")
  private val env=OrtEnvironment.getEnvironment()
  private val session:OrtSession
  private val size=640
