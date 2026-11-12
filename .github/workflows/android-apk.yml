@@ -20,18 +20,18 @@ jobs:
       - name: Compilar APK
         run: gradle --no-daemon :app:assembleDebug
       - name: Preparar arquivo APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk FOCOS-v1.1.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk FOCOS-v2.0.apk
       - uses: actions/upload-artifact@v4
         with:
           name: FOCOS-APK
-          path: FOCOS-v1.1.apk
+          path: FOCOS-v2.0.apk
           if-no-files-found: error
       - name: Publicar APK em Releases
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view v1.1 >/dev/null 2>&1; then
-            gh release upload v1.1 FOCOS-v1.1.apk --clobber
+          if gh release view v2.0 >/dev/null 2>&1; then
+            gh release upload v2.0 FOCOS-v2.0.apk --clobber
           else
-            gh release create v1.1 FOCOS-v1.1.apk --title "FOCOS v1.1" --notes "APK Android experimental: câmera, foto e contagem manual por toque. Instalação de teste; contagem automática ainda é estimada." --latest
+            gh release create v2.0 FOCOS-v2.0.apk --title "FOCOS v2.0" --notes "Contador offline com fundo adaptativo, estimativa de itens encostados, edição manual e temas. Versão experimental." --latest
           fi
