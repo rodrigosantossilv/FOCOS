@@ -20,6 +20,8 @@ class MainActivity:ComponentActivity(){
  private var dark=false
  private var sensitivity=55
  private var minArea=35
+ private var detector:YoloDetector?=null
+ private var detections=listOf<YoloDetector.Detection>()
  private var cameraUri:Uri?=null
  private var generation=0
  private lateinit var total:TextView
@@ -45,6 +47,7 @@ class MainActivity:ComponentActivity(){
   super.onCreate(savedInstanceState)
   window.statusBarColor=Color.rgb(15,23,42);window.navigationBarColor=Color.rgb(15,23,42)
   window.decorView.systemUiVisibility=0
+  try{detector=YoloDetector(this)}catch(e:Exception){android.util.Log.w("FOCOS","Modelo YOLO indisponível",e)}
   buildUi();showExample()
  }
  private fun buildUi(){
@@ -67,7 +70,7 @@ class MainActivity:ComponentActivity(){
   edits.addView(button("Desfazer"){if(history.isNotEmpty()){marks=history.removeLast().toMutableList();refreshMarks()}},LinearLayout.LayoutParams(0,dp(50),1f))
   edits.addView(button("Recontar"){analyze()},LinearLayout.LayoutParams(0,dp(50),1f))
   controls.addView(edits)
-  controls.addView(label("Sensibilidade",15f,true))
+  controls.addView(label("Confiança da detecção",15f,true))
   controls.addView(SeekBar(this).apply{
    max=100;progress=sensitivity
    setOnSeekBarChangeListener(object:SeekBar.OnSeekBarChangeListener{
@@ -76,7 +79,7 @@ class MainActivity:ComponentActivity(){
     override fun onStopTrackingTouch(s:SeekBar?){}
    })
   })
-  controls.addView(label("Tamanho mínimo",15f,true))
+  controls.addView(label("Tamanho mínimo (reservado)",15f,true))
   controls.addView(SeekBar(this).apply{
    max=600;progress=minArea
    setOnSeekBarChangeListener(object:SeekBar.OnSeekBarChangeListener{
@@ -120,11 +123,13 @@ class MainActivity:ComponentActivity(){
   val b=photo?:return;val id=++generation
   warning.text="Analisando imagem..."
   worker.execute{
-   val r=Counter.analyze(b,sensitivity,minArea)
+   val r=detector?.detect(b,(sensitivity.coerceIn(0,100)/100f).coerceAtLeast(.05f))
    runOnUiThread{
     if(id==generation&&photo===b){
-     marks=r.marks.toMutableList();history.clear()
-     warning.text=r.warning;refreshMarks()
+     detections=r?:emptyList()
+     marks=detections.map{Counter.Mark(it.box.centerX(),it.box.centerY(),false)}.toMutableList();history.clear()
+     warning.text=if(r==null)"Modelo YOLOv8 não instalado. Contagem automática indisponível." else if(r.isEmpty())"Nenhum objeto reconhecido. Verifique a foto e a confiança." else "YOLOv8 offline • ${r.size} detecções. Revise os resultados."
+     refreshMarks()
     }
    }
   }
@@ -141,10 +146,10 @@ class MainActivity:ComponentActivity(){
   val by=(y-rect.top)*b.height/rect.height()
   val index=marks.indexOfFirst{hypot((it.x-bx).toDouble(),(it.y-by).toDouble())<max(18.0,b.width*.035)}
   history.addLast(marks.toList());if(history.size>30)history.removeFirst()
-  if(index>=0)marks.removeAt(index)else marks.add(Counter.Mark(bx,by,false))
+  if(index>=0){marks.removeAt(index);detections=emptyList()}else{marks.add(Counter.Mark(bx,by,false));detections=emptyList()}
   refreshMarks()
  }
- override fun onDestroy(){super.onDestroy();worker.shutdown()}
+ override fun onDestroy(){super.onDestroy();worker.shutdown();detector?.close()}
  inner class PhotoOverlay:View(this@MainActivity){
   private val pen=Paint(3)
   fun imageRect(b:Bitmap):RectF{
@@ -156,7 +161,8 @@ class MainActivity:ComponentActivity(){
    super.onDraw(c);c.drawColor(if(dark)Color.rgb(30,41,59)else Color.rgb(229,235,241))
    val b=photo?:return;val r=imageRect(b)
    c.drawBitmap(b,null,r,Paint(3))
-   for(m in marks){
+   for((idx,m) in marks.withIndex()){
+    if(idx<detections.size && idx<marks.size){val d=detections[idx];val box=d.box;pen.color=Color.rgb(16,185,129);pen.style=Paint.Style.STROKE;pen.strokeWidth=dp(2).toFloat();pen.pathEffect=null;c.drawRect(r.left+box.left*r.width()/b.width,r.top+box.top*r.height()/b.height,r.left+box.right*r.width()/b.width,r.top+box.bottom*r.height()/b.height,pen)}
     val x=r.left+m.x*r.width()/b.width;val y=r.top+m.y*r.height()/b.height
     pen.color=if(m.estimated)Color.rgb(245,158,11)else Color.rgb(16,185,129)
     pen.style=Paint.Style.STROKE;pen.strokeWidth=dp(3).toFloat()
