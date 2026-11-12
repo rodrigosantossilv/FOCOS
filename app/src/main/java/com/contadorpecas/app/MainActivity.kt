@@ -1,194 +1,174 @@
 package com.contadorpecas.app
 
-import android.Manifest
-import android.content.pm.PackageManager
+import android.content.ContentValues
 import android.graphics.*
+import android.net.Uri
 import android.os.Bundle
+import android.provider.MediaStore
 import android.view.*
 import android.widget.*
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.*
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
-import androidx.core.content.ContextCompat
 import java.util.concurrent.Executors
+import kotlin.math.*
 
-class MainActivity:ComponentActivity() {
+class MainActivity:ComponentActivity(){
  private val worker=Executors.newSingleThreadExecutor()
- private lateinit var preview:PreviewView
- private lateinit var photo:ImageView
- private lateinit var markers:Markers
- private lateinit var count:TextView
- private lateinit var subtitle:TextView
- private lateinit var modeButton:Button
- private var selected:Bitmap?=null
- private var threshold=125
- private var minArea=70
- private var dark=true
- private var manual=false
- private var last=0L
- private val taps=mutableListOf<PointF>()
- private val permission=registerForActivityResult(ActivityResultContracts.RequestPermission()){if(it)startCamera()}
- private val picker=registerForActivityResult(ActivityResultContracts.GetContent()){uri->
-  if(uri!=null) try {
-   contentResolver.openInputStream(uri)?.use {stream->
-    val bmp=BitmapFactory.decodeStream(stream)
-    if(bmp!=null) {
-     selected=scale(bmp);photo.setImageBitmap(selected);photo.visibility=View.VISIBLE
-     preview.visibility=View.GONE;taps.clear();refresh()
+ private var photo:Bitmap?=null
+ private var marks=mutableListOf<Counter.Mark>()
+ private val history=ArrayDeque<List<Counter.Mark>>()
+ private var dark=false
+ private var sensitivity=55
+ private var minArea=35
+ private var cameraUri:Uri?=null
+ private var generation=0
+ private lateinit var total:TextView
+ private lateinit var warning:TextView
+ private lateinit var overlay:PhotoOverlay
+ private lateinit var root:LinearLayout
+ private val take=registerForActivityResult(ActivityResultContracts.TakePicture()){ok->
+  val uri=cameraUri
+  if(ok&&uri!=null)load(uri)
+  else if(uri!=null)contentResolver.delete(uri,null,null)
+  cameraUri=null
+ }
+ private val gallery=registerForActivityResult(ActivityResultContracts.GetContent()){uri->if(uri!=null)load(uri)}
+ private fun dp(v:Int)=(v*resources.displayMetrics.density).toInt()
+ private fun fg()=if(dark)Color.WHITE else Color.rgb(20,30,49)
+ private fun bg()=if(dark)Color.rgb(15,23,42) else Color.rgb(246,248,252)
+ private fun label(s:String,size:Float,bold:Boolean=false)=TextView(this).apply{
+  text=s;textSize=size;setTextColor(fg());setPadding(dp(3),dp(5),dp(3),dp(5))
+  if(bold)setTypeface(null,Typeface.BOLD)
+ }
+ private fun button(s:String,click:()->Unit)=Button(this).apply{text=s;isAllCaps=false;setOnClickListener{click()}}
+ override fun onCreate(savedInstanceState:Bundle?){
+  super.onCreate(savedInstanceState)
+  window.statusBarColor=Color.rgb(15,23,42);window.navigationBarColor=Color.rgb(15,23,42)
+  window.decorView.systemUiVisibility=0
+  buildUi();showExample()
+ }
+ private fun buildUi(){
+  root=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(dp(14),dp(8),dp(14),dp(8));setBackgroundColor(bg())}
+  val heading=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL;gravity=Gravity.CENTER_VERTICAL}
+  heading.addView(label("FOCOS 2.0",22f,true),LinearLayout.LayoutParams(0,-2,1f))
+  heading.addView(button(if(dark)"Tema claro" else "Tema escuro"){dark=!dark;buildUi();refreshMarks()},LinearLayout.LayoutParams(dp(128),dp(48)))
+  root.addView(heading)
+  total=label("0 objetos",36f,true);root.addView(total)
+  warning=label("Processamento local • Sem envio de fotos",13f);root.addView(warning)
+  overlay=PhotoOverlay()
+  root.addView(overlay,LinearLayout.LayoutParams(-1,0,1f))
+  val scroller=ScrollView(this)
+  val controls=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL}
+  val buttons=LinearLayout(this)
+  buttons.addView(button("Tirar foto"){capture()},LinearLayout.LayoutParams(0,dp(54),1f))
+  buttons.addView(button("Galeria"){gallery.launch("image/*")},LinearLayout.LayoutParams(0,dp(54),1f))
+  controls.addView(buttons)
+  val edits=LinearLayout(this)
+  edits.addView(button("Desfazer"){if(history.isNotEmpty()){marks=history.removeLast().toMutableList();refreshMarks()}},LinearLayout.LayoutParams(0,dp(50),1f))
+  edits.addView(button("Recontar"){analyze()},LinearLayout.LayoutParams(0,dp(50),1f))
+  controls.addView(edits)
+  controls.addView(label("Sensibilidade",15f,true))
+  controls.addView(SeekBar(this).apply{
+   max=100;progress=sensitivity
+   setOnSeekBarChangeListener(object:SeekBar.OnSeekBarChangeListener{
+    override fun onProgressChanged(s:SeekBar?,p:Int,u:Boolean){sensitivity=p;if(u)analyze()}
+    override fun onStartTrackingTouch(s:SeekBar?){}
+    override fun onStopTrackingTouch(s:SeekBar?){}
+   })
+  })
+  controls.addView(label("Tamanho mínimo",15f,true))
+  controls.addView(SeekBar(this).apply{
+   max=600;progress=minArea
+   setOnSeekBarChangeListener(object:SeekBar.OnSeekBarChangeListener{
+    override fun onProgressChanged(s:SeekBar?,p:Int,u:Boolean){minArea=p.coerceAtLeast(1);if(u)analyze()}
+    override fun onStartTrackingTouch(s:SeekBar?){}
+    override fun onStopTrackingTouch(s:SeekBar?){}
+   })
+  })
+  controls.addView(label("Toque em um ponto para remover. Toque em um espaço vazio para adicionar. Marcas tracejadas são estimadas.",12f))
+  scroller.addView(controls)
+  root.addView(scroller,LinearLayout.LayoutParams(-1,dp(255)))
+  setContentView(root)
+ }
+ private fun capture(){
+  val values=ContentValues().apply{
+   put(MediaStore.Images.Media.DISPLAY_NAME,"FOCOS_"+System.currentTimeMillis()+".jpg")
+   put(MediaStore.Images.Media.MIME_TYPE,"image/jpeg")
+  }
+  val uri=contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,values)
+  if(uri==null){Toast.makeText(this,"Não foi possível abrir a câmera",Toast.LENGTH_LONG).show();return}
+  cameraUri=uri;take.launch(uri)
+ }
+ private fun load(uri:Uri){
+  try{
+   val bmp=contentResolver.openInputStream(uri)?.use{BitmapFactory.decodeStream(it)}
+   if(bmp==null){warning.text="Foto inválida";return}
+   val size=640f/max(bmp.width,bmp.height)
+   photo=if(size<1f)Bitmap.createScaledBitmap(bmp,max(1,(bmp.width*size).toInt()),max(1,(bmp.height*size).toInt()),true)else bmp
+   overlay.invalidate();analyze()
+  }catch(e:Exception){warning.text="Não foi possível abrir esta foto."}
+ }
+ private fun showExample(){
+  val b=Bitmap.createBitmap(480,640,Bitmap.Config.ARGB_8888)
+  val c=Canvas(b);c.drawColor(Color.rgb(236,240,244))
+  val p=Paint(3).apply{color=Color.rgb(63,87,110)}
+  val coords=listOf(90f to 120f,230f to 115f,360f to 145f,120f to 280f,270f to 300f,380f to 330f,140f to 470f,300f to 490f)
+  for((x,y) in coords){c.drawCircle(x,y,24f,p)}
+  photo=b;analyze()
+ }
+ private fun analyze(){
+  val b=photo?:return;val id=++generation
+  warning.text="Analisando imagem..."
+  worker.execute{
+   val r=Counter.analyze(b,sensitivity,minArea)
+   runOnUiThread{
+    if(id==generation&&photo===b){
+     marks=r.marks.toMutableList();history.clear()
+     warning.text=r.warning;refreshMarks()
     }
    }
-  }catch(_:Exception){Toast.makeText(this,"Não foi possível abrir a imagem",Toast.LENGTH_LONG).show()}
- }
- private fun dp(n:Int)=(n*resources.displayMetrics.density).toInt()
- private fun label(s:String,size:Float=16f,bold:Boolean=false)=TextView(this).apply{
-  text=s;textSize=size;setTextColor(Color.WHITE)
-  if(bold)setTypeface(null,android.graphics.Typeface.BOLD)
-  setPadding(dp(3),dp(5),dp(3),dp(5))
- }
- private fun button(s:String,click:()->Unit)=Button(this).apply{
-  text=s;isAllCaps=false;setOnClickListener{click()}
- }
- override fun onCreate(savedInstanceState:Bundle?) {
-  super.onCreate(savedInstanceState)
-  window.statusBarColor=Color.rgb(15,23,42)
-  window.navigationBarColor=Color.rgb(15,23,42)
-  window.decorView.systemUiVisibility=0
-  val root=LinearLayout(this).apply{
-   orientation=LinearLayout.VERTICAL;setPadding(dp(12),dp(8),dp(12),dp(8))
-   setBackgroundColor(Color.rgb(15,23,42))
-  }
-  root.addView(label("FOCOS  |  Contador de Peças",21f,true))
-  count=label("0 peças",34f,true);root.addView(count)
-  subtitle=label("Contagem automática estimada",13f);root.addView(subtitle)
-  val frame=FrameLayout(this).apply{setBackgroundColor(Color.BLACK)}
-  preview=PreviewView(this).apply{scaleType=PreviewView.ScaleType.FIT_CENTER}
-  photo=ImageView(this).apply{scaleType=ImageView.ScaleType.FIT_CENTER;visibility=View.GONE}
-  markers=Markers()
-  frame.addView(preview,FrameLayout.LayoutParams(-1,-1))
-  frame.addView(photo,FrameLayout.LayoutParams(-1,-1))
-  frame.addView(markers,FrameLayout.LayoutParams(-1,-1))
-  root.addView(frame,LinearLayout.LayoutParams(-1,0,1f))
-  val controls=ScrollView(this).apply{isFillViewport=false}
-  val panel=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL}
-  val sources=LinearLayout(this)
-  sources.addView(button("Câmera"){selected=null;taps.clear();photo.visibility=View.GONE;preview.visibility=View.VISIBLE;markers.clear();refresh();ensureCamera()},LinearLayout.LayoutParams(0,dp(52),1f))
-  sources.addView(button("Abrir foto"){picker.launch("image/*")},LinearLayout.LayoutParams(0,dp(52),1f))
-  panel.addView(sources)
-  modeButton=button("Modo: Automático (estimativa)"){manual=!manual;taps.clear();refresh()}
-  panel.addView(modeButton,LinearLayout.LayoutParams(-1,dp(52)))
-  val actions=LinearLayout(this)
-  actions.addView(button("Desfazer"){if(manual&&taps.isNotEmpty()){taps.removeAt(taps.lastIndex);refresh()}},LinearLayout.LayoutParams(0,dp(48),1f))
-  actions.addView(button("Zerar"){taps.clear();if(manual)refresh() else {selected=null;photo.visibility=View.GONE;preview.visibility=View.VISIBLE;markers.clear();refresh()}},LinearLayout.LayoutParams(0,dp(48),1f))
-  panel.addView(actions)
-  panel.addView(label("Ajustes do modo automático",14f,true))
-  panel.addView(CheckBox(this).apply{
-   text="Peças escuras em fundo claro";setTextColor(Color.WHITE);isChecked=true
-   setOnCheckedChangeListener{_,v->dark=v;refresh()}
-  })
-  panel.addView(label("Contraste",13f))
-  panel.addView(SeekBar(this).apply{
-   max=255;progress=threshold
-   setOnSeekBarChangeListener(object:SeekBar.OnSeekBarChangeListener{
-    override fun onProgressChanged(s:SeekBar?,p:Int,u:Boolean){threshold=p;if(u)refresh()}
-    override fun onStartTrackingTouch(s:SeekBar?){}
-    override fun onStopTrackingTouch(s:SeekBar?){}
-   })
-  })
-  panel.addView(label("Tamanho mínimo detectado",13f))
-  panel.addView(SeekBar(this).apply{
-   max=800;progress=minArea
-   setOnSeekBarChangeListener(object:SeekBar.OnSeekBarChangeListener{
-    override fun onProgressChanged(s:SeekBar?,p:Int,u:Boolean){minArea=p.coerceAtLeast(1);if(u)refresh()}
-    override fun onStartTrackingTouch(s:SeekBar?){}
-    override fun onStopTrackingTouch(s:SeekBar?){}
-   })
-  })
-  panel.addView(label("Dica: no modo manual, toque uma vez em cada peça. Para remover a última marcação, use Desfazer.",12f))
-  controls.addView(panel)
-  root.addView(controls,LinearLayout.LayoutParams(-1,dp(252)))
-  setContentView(root);ensureCamera()
- }
- private fun scale(b:Bitmap):Bitmap{
-  val f=minOf(1f,480f/maxOf(b.width,b.height))
-  return if(f==1f)b else Bitmap.createScaledBitmap(b,(b.width*f).toInt().coerceAtLeast(1),(b.height*f).toInt().coerceAtLeast(1),true)
- }
- private fun refresh(){
-  modeButton.text=if(manual)"Modo: Manual por toque" else "Modo: Automático (estimativa)"
-  subtitle.text=if(manual)"Toque em cada peça para contar" else "Estimativa por contraste — pode contar detalhes como peças"
-  if(manual){count.text="${taps.size} peças";markers.manual(taps)}
-  else {markers.clear();processPhoto()}
- }
- private fun processPhoto(){
-  val b=selected?:return
-  worker.execute{
-   val r=Counter.analyze(b,threshold,minArea,dark)
-   runOnUiThread{if(selected===b&&!manual)display(r)}
   }
  }
- private fun display(r:Counter.Result){count.text="${r.count} peças (estimativa)";markers.show(r)}
- private fun ensureCamera(){
-  if(ContextCompat.checkSelfPermission(this,Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED)startCamera()
-  else permission.launch(Manifest.permission.CAMERA)
+ private fun refreshMarks(){
+  total.text="${marks.size} objetos"
+  overlay.invalidate()
  }
- private fun startCamera(){
-  val future=ProcessCameraProvider.getInstance(this)
-  future.addListener({
-   try{
-    val provider=future.get()
-    val p=Preview.Builder().build().also{it.surfaceProvider=preview.surfaceProvider}
-    val a=ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888).build()
-    a.setAnalyzer(worker){image->
-     try{
-      if(!manual&&selected==null&&System.currentTimeMillis()-last>400){
-       last=System.currentTimeMillis()
-       val plane=image.planes[0];val buf=plane.buffer
-       val bytes=ByteArray(image.width*image.height*4)
-       for(y in 0 until image.height){
-        buf.position(y*plane.rowStride)
-        buf.get(bytes,y*image.width*4,image.width*4)
-       }
-       val b=Bitmap.createBitmap(image.width,image.height,Bitmap.Config.ARGB_8888)
-       b.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(bytes))
-       val m=Matrix().apply{postRotate(image.imageInfo.rotationDegrees.toFloat())}
-       val rotated=Bitmap.createBitmap(b,0,0,b.width,b.height,m,true)
-       val r=Counter.analyze(scale(rotated),threshold,minArea,dark)
-       runOnUiThread{if(!manual&&selected==null)display(r)}
-      }
-     }catch(_:Exception){}finally{image.close()}
-    }
-    provider.unbindAll();provider.bindToLifecycle(this,CameraSelector.DEFAULT_BACK_CAMERA,p,a)
-   }catch(e:Exception){Toast.makeText(this,"Erro na câmera: ${e.message}",Toast.LENGTH_LONG).show()}
-  },ContextCompat.getMainExecutor(this))
+ private fun edit(x:Float,y:Float){
+  val b=photo?:return
+  val rect=overlay.imageRect(b)
+  if(!rect.contains(x,y))return
+  val bx=(x-rect.left)*b.width/rect.width()
+  val by=(y-rect.top)*b.height/rect.height()
+  val index=marks.indexOfFirst{hypot((it.x-bx).toDouble(),(it.y-by).toDouble())<max(18.0,b.width*.035)}
+  history.addLast(marks.toList());if(history.size>30)history.removeFirst()
+  if(index>=0)marks.removeAt(index)else marks.add(Counter.Mark(bx,by,false))
+  refreshMarks()
  }
  override fun onDestroy(){super.onDestroy();worker.shutdown()}
- inner class Markers:View(this@MainActivity){
-  private var result:Counter.Result?=null
-  private val pen=Paint(3).apply{color=Color.rgb(52,211,153);style=Paint.Style.STROKE;strokeWidth=dp(3).toFloat()}
-  fun show(r:Counter.Result){result=r;invalidate()}
-  fun manual(points:List<PointF>){result=null;invalidate()}
-  fun clear(){result=null;invalidate()}
-  override fun onTouchEvent(event:android.view.MotionEvent):Boolean{
-   if(!manual)return false
-   if(event.action==MotionEvent.ACTION_UP){
-    taps.add(PointF(event.x,event.y));refresh();performClick()
+ inner class PhotoOverlay:View(this@MainActivity){
+  private val pen=Paint(3)
+  fun imageRect(b:Bitmap):RectF{
+   val s=min(width.toFloat()/b.width,height.toFloat()/b.height)
+   val rw=b.width*s;val rh=b.height*s
+   return RectF((width-rw)/2,(height-rh)/2,(width+rw)/2,(height+rh)/2)
+  }
+  override fun onDraw(c:Canvas){
+   super.onDraw(c);c.drawColor(if(dark)Color.rgb(30,41,59)else Color.rgb(229,235,241))
+   val b=photo?:return;val r=imageRect(b)
+   c.drawBitmap(b,null,r,Paint(3))
+   for(m in marks){
+    val x=r.left+m.x*r.width()/b.width;val y=r.top+m.y*r.height()/b.height
+    pen.color=if(m.estimated)Color.rgb(245,158,11)else Color.rgb(16,185,129)
+    pen.style=Paint.Style.STROKE;pen.strokeWidth=dp(3).toFloat()
+    pen.pathEffect=if(m.estimated)DashPathEffect(floatArrayOf(9f,7f),0f)else null
+    c.drawCircle(x,y,dp(12).toFloat(),pen)
+    pen.pathEffect=null;pen.style=Paint.Style.FILL;c.drawCircle(x,y,dp(3).toFloat(),pen)
    }
+  }
+  override fun onTouchEvent(e:MotionEvent):Boolean{
+   if(e.action==MotionEvent.ACTION_UP){edit(e.x,e.y);performClick()}
    return true
   }
   override fun performClick():Boolean{super.performClick();return true}
-  override fun onDraw(c:Canvas){
-   super.onDraw(c)
-   if(manual){for((i,p) in taps.withIndex()){
-    c.drawCircle(p.x,p.y,dp(16).toFloat(),pen)
-    val t=Paint(3).apply{color=Color.WHITE;textSize=dp(13).toFloat();typeface=Typeface.DEFAULT_BOLD}
-    c.drawText((i+1).toString(),p.x-dp(4),p.y+dp(5),t)
-   };return}
-   val r=result?:return
-   val s=minOf(width.toFloat()/r.width,height.toFloat()/r.height)
-   val ox=(width-r.width*s)/2;val oy=(height-r.height*s)/2
-   for(p in r.centers)c.drawCircle(ox+p.x*s,oy+p.y*s,dp(10).toFloat(),pen)
-  }
  }
 }
